@@ -97,6 +97,9 @@ class ParseResult:
 	def fail(self, error):
 		self.error = error
 		return self
+	
+	def __str__(self):
+		return repr(self.node)
 
 ## PARSER
 class Parser:

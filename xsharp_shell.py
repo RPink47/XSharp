@@ -15,6 +15,7 @@ def run(fn: str, ftxt: str):
 	parser = Parser(tokens)
 	ast = parser.parse()
 	if ast.error: return None, ast.error
+	print(str(ast))
 
 	compiler = Compiler()
 	res = compiler.compile(ast.node)
