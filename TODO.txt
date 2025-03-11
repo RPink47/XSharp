@@ -1,0 +1,2 @@
+Add highlighting for multiline comments
+Fix styles for VM

@@ -1,8 +1,7 @@
 from xsharp_helper import InvalidSyntax, Position
-from xsharp_lexer import TT, Token
+from xsharp_lexer import TT, Token, DATA_TYPES
 
 ## NODES
-
 class Statements:
 	def __init__(self, start_pos: Position, end_pos: Position, body: list):
 		self.start_pos = start_pos
@@ -24,7 +23,16 @@ class IntLiteral:
 	
 	def __repr__(self):
 		return f"Literal[{self.value}]"
+
+class ArrayLiteral:
+	def __init__(self, elements: list, start_pos: Position, end_pos: Position):
+		self.elements = elements
+		self.start_pos = start_pos
+		self.end_pos = end_pos
 	
+	def __repr__(self):
+		return "Array[" + ", ".join([f"{element}" for element in self.elements]) + "]"
+
 class Identifier:
 	def __init__(self, symbol: str, start_pos: Position, end_pos: Position):
 		self.symbol = symbol
@@ -41,6 +49,9 @@ class BinaryOperation:
 		self.op = op
 		self.right = right
 		self.in_parentheses = False
+
+		self.start_pos = left.start_pos
+		self.end_pos = right.end_pos
 	
 	def __repr__(self):
 		return f"({self.left}, {self.op}, {self.right})"
@@ -50,12 +61,17 @@ class UnaryOperation:
 		self.op = op
 		self.value = value
 		self.in_parentheses = False
+
+		self.start_pos = op.start_pos
+		self.end_pos = value.end_pos
 	
 	def __repr__(self):
 		return f"({self.op}, {self.value})"
 
 class ConstDefinition:
-	def __init__(self, symbol: Identifier, value: IntLiteral):
+	def __init__(self, symbol: Identifier, value: IntLiteral, start_pos: Position, end_pos: Position):
+		self.start_pos = start_pos
+		self.end_pos = end_pos
 		self.symbol = symbol
 		self.value = value
 	
@@ -63,12 +79,23 @@ class ConstDefinition:
 		return f"ConstDef[{self.symbol} -> {self.value}]"
 
 class VarDeclaration:
-	def __init__(self, identifier: str, value):
+	def __init__(self, identifier: str, value, data_type: str, start_pos: Position, end_pos: Position, length: int|None):
+		self.start_pos = start_pos
+		self.end_pos = end_pos
 		self.identifier = identifier
 		self.value = value
+		self.data_type = data_type
+		self.length = length
 
 	def __repr__(self):
 		return f"VarDeclaration[{self.identifier}] -> {self.value}"
+
+class Assignment:
+	def __init__(self, identifier: Identifier, expr, start_pos: Position, end_pos: Position):
+		self.start_pos = start_pos
+		self.end_pos = end_pos
+		self.identifier = identifier
+		self.expr = expr
 
 class ForLoop:
 	def __init__(self, start_pos: Position, end_pos: Position, identifier: str, start: int, end: int, step: int, body: Statements):
@@ -79,6 +106,21 @@ class ForLoop:
 		self.end = end
 		self.step = step
 		self.body = body
+
+class WhileLoop:
+	def __init__(self, start_pos: Position, end_pos: Position, condition, body: Statements):
+		self.start_pos = start_pos
+		self.end_pos = end_pos
+		self.condition = condition
+		self.body = body
+
+class PlotExpr:
+	def __init__(self, x, y, value: int, start_pos: Position, end_pos: Position):
+		self.x = x
+		self.y = y
+		self.value = value
+		self.start_pos = start_pos
+		self.end_pos = end_pos
 
 ## PARSE RESULT
 class ParseResult:
@@ -108,12 +150,12 @@ class Parser:
 		self.current_token = None
 		self.token_index = -1
 		self.advance()
-	
+
 	def advance(self):
 		self.token_index += 1
 		if self.token_index < len(self.tokens):
 			self.current_token = self.tokens[self.token_index]
-	
+
 	def parse(self):
 		res = ParseResult()
 
@@ -127,7 +169,7 @@ class Parser:
 			))
 
 		return res.success(ast)
-	
+
 	def statements(self, end=(TT.EOF, )):
 		res = ParseResult()
 		body = []
@@ -156,14 +198,17 @@ class Parser:
 	def statement(self):
 		if self.current_token.token_type == TT.KEYWORD:
 			match self.current_token.value:
-				case "define": return self.const_definition()
+				case "const": return self.const_definition()
 				case "var": return self.var_declaration()
 				case "for": return self.for_loop()
+				case "while": return self.while_loop()
+				case "plot": return self.plot_expr()
 
 		return self.expression()
 
 	def const_definition(self):
 		res = ParseResult()
+		start_pos = self.current_token.start_pos
 		self.advance()
 
 		identifier = res.register(self.literal())
@@ -175,19 +220,16 @@ class Parser:
 				"Expected an identifier after 'define' keyword."
 			))
 		
-		value = res.register(self.literal())
+		value = res.register(self.expression())
+		end_pos = self.current_token.end_pos
 		if res.error: return res
-
-		if not isinstance(value, IntLiteral):
-			return res.fail(InvalidSyntax(
-				value.start_pos, value.end_pos,
-				"Expected an identifier after 'define' keyword."
-			))
 		
-		return res.success(ConstDefinition(identifier, value))
+		return res.success(ConstDefinition(identifier, value, start_pos, end_pos))
 
 	def var_declaration(self):
 		res = ParseResult()
+		start_pos = self.current_token.start_pos
+		length: int|None = None
 		self.advance()
 
 		if self.current_token.token_type != TT.IDENTIFIER:
@@ -198,8 +240,49 @@ class Parser:
 		identifier = self.current_token.value
 		self.advance()
 
+		if self.current_token.token_type != TT.COL:
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected ':' after variable."
+			))
+		self.advance()
+
+		if not (self.current_token.token_type == TT.KEYWORD and self.current_token.value in DATA_TYPES):
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				f"Expected {', '.join(DATA_TYPES)} after ':'."
+			))
+		data_type = self.current_token.value
+		self.advance()
+
+		if self.current_token.token_type == TT.LSQ: # Array
+			self.advance()
+			
+			if self.current_token.token_type != TT.NUM:
+				return res.fail(InvalidSyntax(
+					self.current_token.start_pos, self.current_token.end_pos,
+					"Expected a number for the array length."
+				))
+			length = self.current_token.value
+			self.advance()
+
+			if self.current_token.token_type != TT.RSQ:
+				return res.fail(InvalidSyntax(
+					self.current_token.start_pos, self.current_token.end_pos,
+					"Expected ']' after array length."
+				))
+			self.advance()
+
+		if self.current_token.token_type != TT.ASSIGN:
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected '=' after ':'."
+			))
+		self.advance()
+
 		expr = res.register(self.expression())
 		if res.error: return res
+		end_pos = self.current_token.end_pos
 
 		if self.current_token.token_type not in (TT.NEWLINE, TT.EOF):
 			return res.fail(InvalidSyntax(
@@ -207,7 +290,7 @@ class Parser:
 				"Expected a newline or EOF after variable declaration."
 			))
 		
-		return res.success(VarDeclaration(identifier, expr))
+		return res.success(VarDeclaration(identifier, expr, data_type, start_pos, end_pos, length))
 
 	def for_loop(self):
 		res = ParseResult()
@@ -274,12 +357,21 @@ class Parser:
 				"Expected ':' after 'step' keyword."
 			))
 		self.advance()
-		if self.current_token.token_type != TT.NUM:
+		if self.current_token.token_type not in (TT.NUM, TT.SUB):
 			return res.fail(InvalidSyntax(
 				self.current_token.start_pos, self.current_token.end_pos,
 				"Expected a step value."
 			))
-		step = self.current_token.value
+		negative = self.current_token.token_type == TT.SUB
+		if negative:
+			self.advance()
+			if self.current_token.token_type != TT.NUM:
+				return res.fail(InvalidSyntax(
+					self.current_token.start_pos, self.current_token.end_pos,
+					"Expected a step value."
+				))
+
+		step = self.current_token.value * (-1)**negative
 		self.advance()
 
 		if self.current_token.token_type != TT.LBR:
@@ -302,8 +394,84 @@ class Parser:
 
 		return res.success(ForLoop(start_pos, end_pos, identifier, start, end, step, body))
 
+	def while_loop(self):
+		res = ParseResult()
+		start_pos = self.current_token.start_pos
+		self.advance()
+
+		condition = res.register(self.expression())
+		if res.error: return res
+
+		if self.current_token.token_type != TT.LBR:
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected '{' before while loop body."
+			))
+		self.advance()
+
+		body = res.register(self.statements(end=(TT.EOF, TT.RBR)))
+		if res.error: return res
+
+		if self.current_token.token_type != TT.RBR:
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected '}' after while loop body."
+			))
+		end_pos = self.current_token.end_pos
+		self.advance()
+
+		return res.success(WhileLoop(start_pos, end_pos, condition, body))
+
+	def plot_expr(self):
+		res = ParseResult()
+		start_pos = self.current_token.start_pos
+		self.advance()
+		
+		x = res.register(self.expression())
+		if res.error: return res
+
+		y = res.register(self.expression())
+		if res.error: return res
+
+		if self.current_token.token_type != TT.NUM:
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected an integer for plot value."
+			))
+		if self.current_token.value not in (0, 1):
+			return res.fail(InvalidSyntax(
+				self.current_token.start_pos, self.current_token.end_pos,
+				"Expected 0 or 1 for plot value."
+			))
+		value = self.current_token.value
+		end_pos = self.current_token.end_pos
+		self.advance()
+
+		return res.success(PlotExpr(x, y, value, start_pos, end_pos))
+
 	def expression(self):
-		return self.logical()
+		return self.assignment()
+
+	def assignment(self):
+		res = ParseResult()
+		start_pos = self.current_token.start_pos
+		value = res.register(self.comparison())
+		if res.error: return res
+
+		if self.current_token.token_type == TT.ASSIGN: # Assignment -> var = value
+			self.advance()
+			if not isinstance(value, Identifier):
+				return res.fail(InvalidSyntax(
+					value.start_pos, value.end_pos,
+					"Expected an identifier before ':'."
+				))
+			expr = res.register(self.expression())
+			end_pos = self.current_token.end_pos
+			if res.error: return res
+
+			return res.success(Assignment(value, expr, start_pos, end_pos))
+
+		return res.success(value)
 
 	def binary_op(self, func, token_types: tuple[TT]):
 		res = ParseResult()
@@ -321,21 +489,31 @@ class Parser:
 			left = BinaryOperation(left, op, right)
 		
 		return res.success(left)
-	
-	def logical(self):
+
+	def comparison(self):
+		return self.binary_op(self.bitwise, (TT.LT, TT.LE, TT.EQ, TT.NE, TT.GT, TT.GE))
+
+	def bitwise(self):
 		return self.binary_op(self.additive, (TT.AND, TT.OR, TT.XOR))
-	
+
 	def additive(self):
 		return self.binary_op(self.unary, (TT.ADD, TT.SUB))
-	
+
 	def unary(self):
 		res = ParseResult()
 
-		if self.current_token.token_type in (TT.ADD, TT.SUB, TT.NOT):
+		if self.current_token.token_type in (TT.ADD, TT.SUB, TT.NOT, TT.AND):
 			tok = self.current_token
 			self.advance()
 			value = res.register(self.unary())
 			if res.error: return res
+
+			if tok.token_type == TT.AND and not isinstance(value, Identifier): # Address operator
+				return res.fail(InvalidSyntax(
+					tok.start_pos, tok.end_pos,
+					"Expected an identifier after '&'."
+				))
+
 			return res.success(UnaryOperation(tok, value))
 		
 		value = res.register(self.literal())
@@ -347,7 +525,7 @@ class Parser:
 			return res.success(UnaryOperation(tok, value))
 		
 		return res.success(value)
-	
+
 	def literal(self):
 		res = ParseResult()
 		tok = self.current_token
@@ -370,4 +548,29 @@ class Parser:
 			expr.in_parentheses = True
 			return res.success(expr)
 
-		return res.fail(InvalidSyntax(tok.start_pos, tok.end_pos, f"Expected a number, an identifier or '(', found token '{tok.token_type}' instead."))
+		if tok.token_type == TT.LBR:
+			elements = []
+			
+			# First element
+			expr = res.register(self.comparison())
+			if res.error: return res
+			elements.append(expr)
+
+			while self.current_token.token_type == TT.COMMA:
+				self.advance()
+				expr = res.register(self.comparison())
+				if res.error: return res
+				elements.append(expr)
+			
+			if self.current_token.token_type != TT.RBR:
+				return res.fail(InvalidSyntax(
+					self.current_token.start_pos, self.current_token.end_pos,
+					"Expected ',' or '}' after array elements."
+				))
+			end_token = self.current_token
+
+			self.advance()
+			return res.success(ArrayLiteral(elements, tok.start_pos, end_token.end_pos))
+
+		LBR = "{"
+		return res.fail(InvalidSyntax(tok.start_pos, tok.end_pos, f"Expected a number, an identifier, '(' or '{LBR}', found token '{tok.token_type}' instead."))

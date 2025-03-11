@@ -1,6 +1,8 @@
-from PyQt6.QtWidgets import QMainWindow, QApplication, QLineEdit, QLabel, QPushButton, QTextEdit
+from PyQt6.QtWidgets import QMainWindow, QApplication, QPushButton, QTextEdit, QFileDialog, QLabel
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
 from PyQt6.QtCore import QRegularExpression
+from PyQt6 import uic
+from xenon_vm import BinSyntaxHighlighter
 
 # Lookup table for codes
 # Format: A? NotD ZeroD And|Add NotOutPut ZeroA|M NotA|M DisableCarry
@@ -8,6 +10,7 @@ ALU_CODES = {
 	"0": 36,
 	"1": 126,
 	"-1": 44,
+	"-2": 118,
 	"D": 6,
 	"A": 224,
 	"M": 96,
@@ -18,11 +21,11 @@ ALU_CODES = {
 	"-A": 248,
 	"-M": 120,
 	"D++": 94,
-	"A++": 251,
-	"M++": 123,
+	"A++": 250,
+	"M++": 122,
 	"D--": 22,
-	"A--": 248,
-	"M--": 120,
+	"A--": 240,
+	"M--": 112,
 	"D+A": 144,
 	"D+M": 16,
 	"D-A": 216,
@@ -47,37 +50,68 @@ JUMPS = {
 	"JLT": 1, "JEQ": 2, "JLE": 3, "JGT": 4, "JNE": 5, "JGE": 6, "JMP": 7
 }
 
+def convert_to_bin(value: int):
+	if value >= 0: return bin(value)[2:].zfill(14)
+	
+	difference: int = 16384 + value
+	return f"{bin(difference)[2:].zfill(14)}"
+
 def assemble(ftxt: str):
 	try:
-		binary_file = []
-		file_text = ftxt
-		for i in range(16):
+		binary_result: list[str] = []
+		labels: dict[str, int] = {}
+		skips: int = 0
+
+		file_text: str = ftxt
+		for i in range(16): # Remove register labels r0 - r15
 			file_text = file_text.replace(f"r{i}", f"{i}")
 
+		# Preliminary scan
 		for line_num, line in enumerate(file_text.splitlines()):
-			try: comment_index = line.index("//")
-			except: pass
-			else: line = line[:comment_index]
+			if line.startswith(".") and " " not in line.strip():
+				labels[line.strip()] = line_num - skips
+				skips += 1
 
-			if line.strip() == "": continue
+		# Assemble
+		for line_num, line in enumerate(file_text.splitlines()):
+			line = line.strip()
+
+			try:
+				comment_index = line.index("//")
+			except:
+				pass
+			else:
+				line = line[:comment_index] # Remove comments
+
+			if line.strip() == "":
+				binary_result.append("0" * 16) # NOOP
+				continue # Skip empty lines
 
 			ln = line.strip().split(" ")
 			inst = ln[0]
 
 			match inst:
-				case "NOOP":
+				case "NOOP": # No operation
 					if len(ln) != 1: raise SyntaxError(f"Line {line_num + 1}: Expected 0 arguments for instruction NOOP, found {len(ln) - 1} arguments instead.")
-					binary_file.append("0" * 16)
+					binary_result.append("0" * 16)
 				
-				case "HALT":
+				case "HALT": # Halts the execution of the program
 					if len(ln) != 1: raise SyntaxError(f"Line {line_num + 1}: Expected 0 arguments for instruction HALT, found {len(ln) - 1} arguments instead.")
-					binary_file.append("0" * 15 + "1")
+					binary_result.append("0" * 13 + "100")
 				
 				case "LDIA": # Load immediate value into A register
 					if len(ln) != 2: raise SyntaxError(f"Line {line_num + 1}: Expected 1 argument for instruction LDIA, found {len(ln) - 1} arguments instead.")
 
-					value = bin(int(ln[1]))[2:].zfill(14)
-					binary_file.append(f"10{value}")
+					immediate = ln[1]
+					if immediate in labels: immediate = labels[immediate]
+
+					try:
+						value = int(immediate)
+					except ValueError:
+						return ValueError(f"Label '{immediate}' unbound.")
+					
+
+					binary_result.append(f"{convert_to_bin(value)}10")
 				
 				case "COMP": # Compute ALU instruction
 					if len(ln) not in (2, 3, 4): raise SyntaxError(f"Line {line_num + 1}: Expected 1 - 3 arguments for instruction COMP, found {len(ln) - 1} arguments instead.")
@@ -95,13 +129,18 @@ def assemble(ftxt: str):
 							for i, location in enumerate("DAM"):
 								if location in ln[2]: dest[i] = "1"
 
-					binary_file.append(f"11{bin(code)[2:].zfill(8)}{''.join(dest)}{bin(jump)[2:].zfill(3)}")
+					binary_result.append(f"{bin(code)[2:].zfill(8)}{''.join(dest)}{bin(jump)[2:].zfill(3)}11")
+
+				case "PLOT": # Plot pixel to screen
+					if len(ln) != 2: raise SyntaxError(f"Line {line_num + 1}: Expected 1 argument for instruction NOOP, found {len(ln) - 1} arguments instead.")
+
+					binary_result.append(f"{ln[1]}{'0' * 12}101")
 
 				case _:
-					raise NotImplementedError(f"Unknown instruction: {inst}.")
+					if not (line.startswith(".") and len(ln) == 1):
+						raise NotImplementedError(f"Unknown instruction: {inst}.")
 			
-
-		return binary_file
+		return binary_result
 
 	except SyntaxError as e: return e
 	except ValueError as e: return e
@@ -114,14 +153,16 @@ class ASMSyntaxHighlighter(QSyntaxHighlighter):
 
 		self.create_format("instruction", QColor(105, 205, 255), bold=True)
 		self.create_format("jump", QColor(255, 170, 0), bold=True)
-		self.create_format("location", QColor(255, 255, 0), bold=True)
+		self.create_format("register", QColor(170, 170, 255))
+		self.create_format("destination", QColor(255, 255, 0), bold=True)
 		self.create_format("operation", QColor(150, 150, 150))
 		self.create_format("comment", QColor(85, 170, 127), italic=True)
 		self.create_format("number", QColor(255, 135, 255))
 
-		self.add_rule(r"(D|A|M)", "location")
-		self.add_rule(r"\b(NOOP|HALT|LDIA|COMP)\b", "instruction")
+		self.add_rule(r"\b(D|A|M|DA|AM|DM|DAM)\b", "destination")
+		self.add_rule(r"\b(NOOP|HALT|LDIA|COMP|PLOT)\b", "instruction")
 		self.add_rule(r"\b(JLT|JEQ|JLE|JGT|JNE|JGE|JMP)\b", "jump")
+		self.add_rule(r"\b(r\d+)\b", "register")
 		self.add_rule(r"\b\d+(\.\d+)?\b", "number")
 		self.add_rule(r"(\+|-|&|\||~|\^)", "operation")
 		self.add_rule(r"//[^\n]*", "comment")
@@ -150,33 +191,56 @@ class ASMSyntaxHighlighter(QSyntaxHighlighter):
 class Main(QMainWindow):
 	def __init__(self):
 		super().__init__()
+		uic.loadUi("GUI/shell.ui", self)
 		self.setFixedSize(800, 600)
 		self.setWindowTitle("XAsm Assembler")
-		self.setFont(QFont(["JetBrains Mono", "Consolas"], 11))
 
-		self.assemble_button = QPushButton(self)
-		self.assemble_button.setGeometry(660, 40, 100, 40)
-		self.assemble_button.setText("Assemble!")
-		self.assemble_button.clicked.connect(self.assemble)
+		self.process_button.setText("Assemble!")
+		self.process_button.clicked.connect(self.assemble)
 
-		panel_stylesheet: str = f'padding: 12px; font: 10pt "JetBrains Mono"'
+		self.load_file_button.clicked.connect(self.load_file)
+		self.fn = ""
 
-		self.result = QTextEdit(self)
-		self.result.setReadOnly(True)
-		self.result.setGeometry(400, 100, 360, 420)
-		self.result.setStyleSheet(panel_stylesheet)
+		self.result.installEventFilter(self)
+		self.result_highlighter = BinSyntaxHighlighter(self.result.document())
 
-		self.file_text = QTextEdit(self)
-		self.file_text.setGeometry(40, 100, 360, 420)
-		self.file_text.setStyleSheet(panel_stylesheet)
-		self.highlighter = ASMSyntaxHighlighter(self.file_text.document())
+		self.file_text.setAcceptRichText(False)
+		self.file_text.installEventFilter(self)
+		self.ftxt_highlighter = ASMSyntaxHighlighter(self.file_text.document())
+
+	def load_file(self):
+		self.fn, _ = QFileDialog.getOpenFileName(self, "Open File", "assembly", "XAsm Files (*.xasm)")
+		if self.fn:
+			with open(self.fn, "r") as file:
+				self.file_text.setPlainText(file.read())
+
+	def eventFilter(self, a0, a1):
+		if a0 == self.file_text:
+			self.ftxt_line_count.setText(
+				f"Line count: {len(self.file_text.toPlainText().splitlines())}"
+			)
+		
+		if a0 == self.result:
+			self.result_line_count.setText(
+				f"Line count: {len(self.result.toPlainText().splitlines())}"
+			)
+
+		return super().eventFilter(a0, a1)
 
 	def assemble(self):
+		self.error.setText("")
+		self.result.setText("")
+
 		result = assemble(self.file_text.toPlainText())
 		if isinstance(result, Exception):
-			self.result.setText(f"{result}")
+			self.error.setText(f"{result}")
 		else:
 			self.result.setText("\n".join(result))
+
+			if self.fn:
+				with open(self.fn.replace(".xasm", ".bin").replace("assembly", "binary", 1), "w") as file:
+					file.write("\n".join(result))
+				self.fn = ""
 
 if __name__ == "__main__":
 	app = QApplication([])
